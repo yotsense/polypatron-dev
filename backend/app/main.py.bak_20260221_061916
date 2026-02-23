@@ -1,0 +1,353 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import List, Tuple, Optional
+
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import insert
+
+from .config import ajustes
+from .db import Base, engine, get_db
+from .models import Vela
+from .schemas import (
+    ReqRankearPatrones, ResRankearPatrones, FilaPatron,
+    ReqSimular, ResSimular, TradeSim,
+    ResUltimaVela, ReqCompararVentanas, ResCompararVentanas, FilaComparacion,
+)
+from .utils_time import iso_a_utc_naive
+from .ingest_gamma import backfill_markets, extraer_campos_vela
+from .patrones import rankear_patrones
+from .simular import simular_entrar_siempre
+from .comparar import comparar_ventanas
+
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(title="PolyPatron API", version="0.3.0")
+
+origins = [o.strip() for o in ajustes.CORS_ORIGINS.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins or ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -------------------------
+# Helpers
+# -------------------------
+
+def _prefix_por_defecto(mercado: str, intervalo: str, override: str = "") -> str:
+    if override:
+        return override
+    return f"{mercado}-{intervalo}-"
+
+
+def _paso_seg(intervalo: str) -> int:
+    if intervalo == "5m":
+        return 300
+    if intervalo == "15m":
+        return 900
+    if intervalo == "1h":
+        return 3600
+    if intervalo == "4h":
+        return 14400
+    raise ValueError("intervalo no soportado")
+
+
+def _insertar_si_no_existe(db: Session, v: Vela) -> bool:
+    stmt = (
+        insert(Vela.__table__)
+        .values(
+            mercado=v.mercado,
+            intervalo=v.intervalo,
+            slug=v.slug,
+            market_id=v.market_id,
+            fin_ts_utc=v.fin_ts_utc,
+            color=v.color,
+            precio_cierre_up=v.precio_cierre_up,
+            precio_cierre_down=v.precio_cierre_down,
+            fuente=v.fuente,
+        )
+        .on_conflict_do_nothing(index_elements=["intervalo", "fin_ts_utc", "slug"])
+    )
+    res = db.execute(stmt)
+    db.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def _asegurar_datos_en_rango(
+    db: Session,
+    *,
+    mercado: str,
+    intervalo: str,
+    inicio: datetime,
+    fin: datetime,
+    prefix_override: str = "",
+    max_pages: int = 30,
+):
+    """
+    Carga silenciosamente (si hace falta) mercados cerrados desde Gamma dentro del rango [inicio, fin],
+    los filtra por prefix, y los guarda en BD.
+
+    Esto reemplaza la necesidad de un botón de "ingesta live".
+    """
+    prefix = _prefix_por_defecto(mercado, intervalo, prefix_override)
+
+    ini_utc = inicio
+    fin_utc = fin
+    # Gamma espera ISO con tz; aquí nos aseguramos de mandar UTC con tzinfo
+    if ini_utc.tzinfo is None:
+        ini_utc = ini_utc.replace(tzinfo=timezone.utc)
+    else:
+        ini_utc = ini_utc.astimezone(timezone.utc)
+
+    if fin_utc.tzinfo is None:
+        fin_utc = fin_utc.replace(tzinfo=timezone.utc)
+    else:
+        fin_utc = fin_utc.astimezone(timezone.utc)
+
+    # Pedimos mercados CERRADOS por end_date_min/max
+    data = await backfill_markets(
+        closed=True,
+        limit=500,
+        max_pages=max_pages,
+        start_date_min=None,
+        start_date_max=None,
+        end_date_min=ini_utc,
+        end_date_max=fin_utc,
+        order="id",
+        ascending=False,
+    )
+
+    # Insertar en BD
+    for m in data:
+        market_id, fin_ts, slug, color, up_p, down_p = extraer_campos_vela(m)
+        if not slug or not slug.startswith(prefix):
+            continue
+        if not market_id or fin_ts is None or color is None:
+            continue
+
+        v = Vela(
+            mercado=mercado,
+            intervalo=intervalo,
+            slug=slug,
+            market_id=market_id,
+            fin_ts_utc=fin_ts,  # ya viene UTC naive desde extractor
+            color=color,
+            precio_cierre_up=up_p,
+            precio_cierre_down=down_p,
+            fuente="gamma",
+        )
+        try:
+            _insertar_si_no_existe(db, v)
+        except Exception:
+            db.rollback()
+            continue
+
+
+def _cargar_colores(
+    db: Session,
+    mercado: str,
+    intervalo: str,
+    inicio: datetime,
+    fin: datetime
+) -> Tuple[List[datetime], List[str]]:
+    """
+    Regresa (fin_ts_list, colores) ordenados por tiempo. Solo V/R.
+    """
+    ini_n = iso_a_utc_naive(inicio)
+    fin_n = iso_a_utc_naive(fin)
+
+    filas = (
+        db.query(Vela)
+        .filter(Vela.mercado == mercado)
+        .filter(Vela.intervalo == intervalo)
+        .filter(Vela.fin_ts_utc >= ini_n)
+        .filter(Vela.fin_ts_utc <= fin_n)
+        .order_by(Vela.fin_ts_utc.asc())
+        .all()
+    )
+
+    fin_ts_list: List[datetime] = []
+    colores: List[str] = []
+    for f in filas:
+        if f.color in ("V", "R"):
+            fin_ts_list.append(f.fin_ts_utc)
+            colores.append(f.color)
+    return fin_ts_list, colores
+
+
+# -------------------------
+# Endpoints
+# -------------------------
+
+@app.get("/salud")
+def salud():
+    return {"ok": True, "app": "PolyPatron"}
+
+
+@app.get("/velas/ultima", response_model=ResUltimaVela)
+def ultima_vela(mercado: str = "btc-updown", intervalo: str = "5m", db: Session = Depends(get_db)):
+    fila = (
+        db.query(Vela)
+        .filter(Vela.mercado == mercado)
+        .filter(Vela.intervalo == intervalo)
+        .order_by(Vela.fin_ts_utc.desc())
+        .first()
+    )
+    return ResUltimaVela(fin_ts_utc=fila.fin_ts_utc if fila else None)
+
+
+@app.post("/patrones/rankear", response_model=ResRankearPatrones)
+async def patrones_rankear(req: ReqRankearPatrones, db: Session = Depends(get_db)):
+    # 1) Asegurar datos del rango (sin botón de ingesta)
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=req.inicio,
+        fin=req.fin,
+    )
+
+    # 2) Cargar colores desde BD
+    _, colores = _cargar_colores(db, req.mercado, req.intervalo, req.inicio, req.fin)
+    if len(colores) < (req.longitud_max + 2):
+        return ResRankearPatrones(filas=[])
+
+    # 3) Rankear
+    filas = rankear_patrones(colores, req.longitud_max, req.min_muestras, alpha=req.suavizado)
+    out = [
+        FilaPatron(
+            patron=p,
+            direccion=d,
+            efectividad=float(e),
+            muestras=int(s),
+            verdes=int(v),
+            rojas=int(r),
+        )
+        for (p, d, e, s, v, r) in filas[:500]
+    ]
+    return ResRankearPatrones(filas=out)
+
+
+@app.post("/simular", response_model=ResSimular)
+async def simular(req: ReqSimular, db: Session = Depends(get_db)):
+    # 1) Asegurar datos del rango (sin botón de ingesta)
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=req.inicio,
+        fin=req.fin,
+    )
+
+    # 2) Cargar datos
+    fin_ts_list, colores = _cargar_colores(db, req.mercado, req.intervalo, req.inicio, req.fin)
+    if len(colores) < (len(req.patron) + 1):
+        raise HTTPException(status_code=400, detail="No hay suficientes datos en el rango.")
+
+    patron = req.patron
+    L = len(patron)
+
+    # Dirección dominante si no mandan dirección
+    v = r = 0
+    for i in range(L, len(colores)):
+        if "".join(colores[i - L:i]) == patron:
+            if colores[i] == "V":
+                v += 1
+            else:
+                r += 1
+
+    if (v + r) == 0:
+        raise HTTPException(status_code=400, detail="Ese patrón no aparece en el rango.")
+
+    dominante = "V" if v >= r else "R"
+    dir_use = req.direccion or dominante
+
+    banca0, banca_fin, pnl_total, roi, max_dd, max_perd, max_gan, trades = simular_entrar_siempre(
+        fin_ts_list=fin_ts_list,
+        colores=colores,
+        patron=patron,
+        direccion=dir_use,
+        banca0=req.banca0,
+        stake=req.stake,
+        payout=req.payout,
+        reinvertir=req.reinvertir,
+    )
+
+    return ResSimular(
+        banca0=banca0,
+        banca_fin=banca_fin,
+        pnl_total=pnl_total,
+        roi=roi,
+        max_drawdown=max_dd,
+        max_racha_perdidas=max_perd,
+        max_racha_ganadas=max_gan,
+        trades=[
+            TradeSim(
+                fin_ts_utc=t.fin_ts_utc,
+                patron=t.patron,
+                direccion=t.direccion,
+                real=t.real,
+                gano=t.gano,
+                pnl=t.pnl,
+                banca_despues=t.banca_despues,
+            )
+            for t in trades
+        ],
+    )
+
+
+@app.post("/patrones/comparar", response_model=ResCompararVentanas)
+async def patrones_comparar(req: ReqCompararVentanas, db: Session = Depends(get_db)):
+    # Para comparar usamos "fin" y ventanas hacia atrás, así que aseguramos datos para la ventana MÁS GRANDE.
+    if not req.ventanas_dias:
+        raise HTTPException(status_code=400, detail="ventanas_dias no puede ir vacío.")
+    dias_max = max(int(x) for x in req.ventanas_dias)
+
+    inicio_max = req.fin - __import__("datetime").timedelta(days=dias_max)
+
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=inicio_max,
+        fin=req.fin,
+    )
+
+    # Dirección automática si no la mandan (dominante en ventana grande)
+    dir_use = req.direccion
+    if dir_use is None:
+        _, colores = _cargar_colores(db, req.mercado, req.intervalo, inicio_max, req.fin)
+        L = len(req.patron)
+        v = r = 0
+        for i in range(L, len(colores)):
+            if "".join(colores[i - L:i]) == req.patron:
+                if colores[i] == "V":
+                    v += 1
+                else:
+                    r += 1
+        dir_use = "V" if v >= r else "R"
+
+    filas_raw, tendencia = comparar_ventanas(
+        db, req.mercado, req.intervalo, req.fin, req.patron, dir_use, req.ventanas_dias
+    )
+
+    filas = []
+    for dias, inicio, fin, efect, muestras, v, r in filas_raw:
+        filas.append(FilaComparacion(
+            dias=dias,
+            inicio=inicio,
+            fin=fin,
+            direccion=dir_use,
+            efectividad=efect,
+            muestras=muestras,
+            verdes=v,
+            rojas=r
+        ))
+
+    return ResCompararVentanas(patron=req.patron, direccion=dir_use, filas=filas, tendencia=tendencia)

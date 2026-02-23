@@ -1,0 +1,84 @@
+"use client";
+
+import React from "react";
+
+export type FilaPatron = {
+  patron: string;
+  direccion: "V" | "R";
+  efectividad: number;
+  muestras: number;
+  verdes: number;
+  rojas: number;
+};
+
+export type Seleccion = { patron: string; direccion: "V" | "R" } | null;
+
+export default function RankTable({
+  filas,
+  onSimular,
+  onElegirParaComparar,
+}: {
+  filas: FilaPatron[];
+  onSimular: (patron: string, direccion: "V" | "R") => void;
+  onElegirParaComparar: (patron: string, direccion: "V" | "R") => void;
+}) {
+  return (
+    <div className="card">
+      <div className="cardHeader">
+        <b>Ranking de patrones</b>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>Efectividad = % de veces que la vela siguiente fue V o R (según dirección).</div>
+      </div>
+
+      <div className="tableWrap">
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+          <thead>
+            <tr style={{ textAlign: "left" }}>
+              <th >Patrón</th>
+              <th >Dir</th>
+              <th >Efectividad</th>
+              <th >Muestras</th>
+              <th >V</th>
+              <th >R</th>
+              <th >Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filas.map((r, idx) => (
+              <tr key={idx}>
+                <td >
+                  {r.patron}
+                </td>
+                <td >{r.direccion}</td>
+                <td >{(r.efectividad * 100).toFixed(2)}%</td>
+                <td >{r.muestras}</td>
+                <td >{r.verdes}</td>
+                <td >{r.rojas}</td>
+                <td >
+                  <button
+                    onClick={() => onSimular(r.patron, r.direccion)}
+                    className="btnPrimary"
+                  >
+                    Simular
+                  </button>
+                  <button
+                    onClick={() => onElegirParaComparar(r.patron, r.direccion)}
+                    
+                  >
+                    Usar en comparar
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {filas.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ padding: 12, opacity: 0.7 }}>
+                  No hay resultados (prueba ampliar rango o bajar mínimo de muestras).
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}

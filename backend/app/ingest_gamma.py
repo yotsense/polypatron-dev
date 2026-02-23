@@ -1,0 +1,145 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
+import json
+import httpx
+from typing import Optional
+
+GAMMA_BASE = "https://gamma-api.polymarket.com"
+
+@dataclass
+class MercadoGamma:
+    id: str
+    slug: str
+    endDate: str | None
+    outcomes: str | None
+    outcomePrices: str | None
+    closed: bool | None
+
+def _color_ganador(outcomes_json: str | None, prices_json: str | None) -> tuple[Optional[str], Optional[float], Optional[float]]:
+    """Regresa (color, precio_up, precio_down) a partir de outcomePrices/outcomes.
+    Convención:
+      - Up  -> "V"
+      - Down-> "R"
+    """
+    try:
+        precios = json.loads(prices_json or "[]")
+        precios = [float(x) for x in precios]
+    except Exception:
+        precios = []
+    if len(precios) < 2:
+        return None, None, None
+
+    try:
+        outcomes = json.loads(outcomes_json or "[]")
+        if not isinstance(outcomes, list) or len(outcomes) < 2:
+            outcomes = ["Up", "Down"]
+    except Exception:
+        outcomes = ["Up", "Down"]
+
+    ganador_idx = 0 if precios[0] >= precios[1] else 1
+    ganador = str(outcomes[ganador_idx]).lower()
+
+    if ganador == "up":
+        return "V", precios[0], precios[1]
+    if ganador == "down":
+        return "R", precios[0], precios[1]
+    return None, precios[0], precios[1]
+
+def construir_slugs(prefix: str, paso_seg: int, bloques: int) -> list[str]:
+    """Construye slugs por timestamp alineado. Útil cuando el formato del slug lo permite."""
+    ahora = int(datetime.now(tz=timezone.utc).timestamp())
+    alineado = (ahora // paso_seg) * paso_seg
+    return [f"{prefix}{alineado - i*paso_seg}" for i in range(1, bloques + 1)]
+
+async def traer_markets_por_slugs(slugs: list[str], closed: bool = True, limit: int = 200) -> list[dict]:
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        chunk_size = 120
+        for i in range(0, len(slugs), chunk_size):
+            chunk = slugs[i:i + chunk_size]
+            params = [("closed", str(closed).lower()), ("limit", str(limit))]
+            params += [("slug", s) for s in chunk]
+            r = await client.get(f"{GAMMA_BASE}/markets", params=params)
+            if r.status_code == 422:
+                return []
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list):
+                out.extend(data)
+    return out
+
+async def backfill_markets(
+    *,
+    closed: bool,
+    limit: int,
+    max_pages: int,
+    start_date_min: Optional[datetime],
+    start_date_max: Optional[datetime],
+    end_date_min: Optional[datetime],
+    end_date_max: Optional[datetime],
+    order: str = "id",
+    ascending: bool = False
+) -> list[dict]:
+    """Consulta paginada a /markets con filtros de fechas.
+    Nota: Gamma espera ISO8601 con tz.
+    """
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        offset = 0
+        for _ in range(max_pages):
+            params: list[tuple[str, str]] = [
+                ("limit", str(limit)),
+                ("offset", str(offset)),
+                ("order", order),
+                ("ascending", str(ascending).lower()),
+            ]
+            if start_date_min:
+                params.append(("start_date_min", start_date_min.replace(tzinfo=timezone.utc).isoformat()))
+            if start_date_max:
+                params.append(("start_date_max", start_date_max.replace(tzinfo=timezone.utc).isoformat()))
+            if end_date_min:
+                params.append(("end_date_min", end_date_min.replace(tzinfo=timezone.utc).isoformat()))
+            if end_date_max:
+                params.append(("end_date_max", end_date_max.replace(tzinfo=timezone.utc).isoformat()))
+            params.append(("closed", str(closed).lower()))
+
+            r = await client.get(f"{GAMMA_BASE}/markets", params=params)
+            if r.status_code == 422:
+                return []
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, list) or not data:
+                break
+            out.extend(data)
+            if len(data) < limit:
+                break
+            offset += limit
+    return out
+
+def extraer_campos_vela(m: dict) -> tuple[Optional[str], Optional[datetime], Optional[str], Optional[str], Optional[float], Optional[float]]:
+    """Regresa: (market_id, fin_ts_utc_naive, slug, color, up_price, down_price)"""
+    market_id = str(m.get("id") or "")
+    slug = str(m.get("slug") or "")
+    end_date = m.get("endDate")
+    outcomes = m.get("outcomes")
+    outcome_prices = m.get("outcomePrices")
+
+    color, up_p, down_p = _color_ganador(outcomes, outcome_prices)
+
+    fin_ts = None
+    if isinstance(end_date, str) and end_date:
+        try:
+            dt = datetime.fromisoformat(end_date.replace("Z", "+00:00")).astimezone(timezone.utc)
+            fin_ts = dt.replace(tzinfo=None)
+        except Exception:
+            fin_ts = None
+
+    return market_id, fin_ts, slug, color, up_p, down_p
+
+def rango_utc_para_lookback(paso_seg: int, bloques: int) -> tuple[datetime, datetime]:
+    """Rango (end_date_min, end_date_max) en UTC para traer los últimos N bloques."""
+    ahora = datetime.now(timezone.utc)
+    fin = ahora
+    inicio = ahora - timedelta(seconds=paso_seg * bloques)
+    return inicio, fin

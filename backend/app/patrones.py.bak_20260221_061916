@@ -1,0 +1,57 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+@dataclass
+class StatsPatron:
+    verdes: int = 0
+    rojas: int = 0
+
+    @property
+    def muestras(self) -> int:
+        return self.verdes + self.rojas
+
+def rankear_patrones(colores: List[str], max_len: int, min_muestras: int, alpha: float = 0.0) -> List[Tuple[str, str, float, int, int, int]]:
+    """Cuenta patrones de V/R y calcula efectividad (edge) para la dirección dominante.
+    alpha > 0 aplica 'suavizado' para que patrones con pocas muestras no se vean inflados.
+    """
+    stats: Dict[str, StatsPatron] = {}
+
+    n = len(colores)
+    for L in range(2, max_len + 1):
+        for i in range(L, n):
+            patron = "".join(colores[i - L:i])
+            siguiente = colores[i]
+            s = stats.get(patron)
+            if s is None:
+                s = StatsPatron()
+                stats[patron] = s
+            if siguiente == "V":
+                s.verdes += 1
+            else:
+                s.rojas += 1
+
+    filas: List[Tuple[str, str, float, int, int, int]] = []
+    for patron, s in stats.items():
+        total = s.muestras
+        if total < min_muestras:
+            continue
+
+        if alpha > 0:
+            pv = (s.verdes + alpha) / (total + 2 * alpha)
+            pr = (s.rojas + alpha) / (total + 2 * alpha)
+        else:
+            pv = s.verdes / total
+            pr = s.rojas / total
+
+        if pv >= pr:
+            direccion = "V"
+            efect = pv
+        else:
+            direccion = "R"
+            efect = pr
+
+        filas.append((patron, direccion, efect, total, s.verdes, s.rojas))
+
+    filas.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    return filas

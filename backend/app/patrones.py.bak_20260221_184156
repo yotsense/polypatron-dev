@@ -1,0 +1,158 @@
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+
+@dataclass
+class StatsPatron:
+    verdes: int = 0
+    rojas: int = 0
+
+    # tiempo
+    ultima_vez: Optional[datetime] = None
+    _prev_vez: Optional[datetime] = None
+    _sum_gap_seg: float = 0.0
+    _count_gap: int = 0
+
+    @property
+    def muestras(self) -> int:
+        return self.verdes + self.rojas
+
+    def ver_aparicion(self, ts: datetime):
+        # ts = momento en que el patrón "se completó" (fin de la última vela del patrón)
+        if self.ultima_vez is None:
+            self.ultima_vez = ts
+            self._prev_vez = ts
+            return
+        # actualizar gaps
+        if self._prev_vez is not None:
+            gap = (ts - self._prev_vez).total_seconds()
+            if gap >= 0:
+                self._sum_gap_seg += gap
+                self._count_gap += 1
+        self._prev_vez = ts
+        if ts > self.ultima_vez:
+            self.ultima_vez = ts
+
+    @property
+    def aparece_cada_seg(self) -> Optional[float]:
+        if self._count_gap <= 0:
+            return None
+        return self._sum_gap_seg / self._count_gap
+
+
+def rankear_patrones(
+    colores: List[str],
+    max_len: int,
+    min_muestras: int,
+    alpha: float = 0.0
+) -> List[Tuple[str, str, float, int, int, int]]:
+    """Versión clásica (compat) sin tiempo."""
+    stats: Dict[str, StatsPatron] = {}
+
+    n = len(colores)
+    for L in range(2, max_len + 1):
+        for i in range(L, n):
+            patron = "".join(colores[i - L:i])
+            siguiente = colores[i]
+            s = stats.get(patron)
+            if s is None:
+                s = StatsPatron()
+                stats[patron] = s
+            if siguiente == "V":
+                s.verdes += 1
+            else:
+                s.rojas += 1
+
+    filas: List[Tuple[str, str, float, int, int, int]] = []
+    for patron, s in stats.items():
+        total = s.muestras
+        if total < min_muestras:
+            continue
+
+        if alpha > 0:
+            pv = (s.verdes + alpha) / (total + 2 * alpha)
+            pr = (s.rojas + alpha) / (total + 2 * alpha)
+        else:
+            pv = s.verdes / total
+            pr = s.rojas / total
+
+        if pv >= pr:
+            direccion = "V"
+            efect = pv
+        else:
+            direccion = "R"
+            efect = pr
+
+        filas.append((patron, direccion, efect, total, s.verdes, s.rojas))
+
+    filas.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    return filas
+
+
+def rankear_patrones_tiempo(
+    fin_ts_list: List[datetime],
+    colores: List[str],
+    min_len: int,
+    max_len: int,
+    min_muestras: int,
+    alpha: float = 0.0,
+) -> List[Tuple[str, str, float, int, int, int, Optional[datetime], Optional[float]]]:
+    """
+    Rankea y además calcula:
+    - ultima_vez (UTC naive)
+    - aparece_cada_seg (promedio entre apariciones)
+    """
+    stats: Dict[str, StatsPatron] = {}
+
+    n = len(colores)
+    if n != len(fin_ts_list):
+        raise ValueError("fin_ts_list y colores deben tener misma longitud")
+
+    min_len = max(2, min_len)
+    max_len = max(min_len, max_len)
+
+    for L in range(min_len, max_len + 1):
+        for i in range(L, n):
+            patron = "".join(colores[i - L:i])
+            siguiente = colores[i]
+
+            # El patrón "se completó" al cierre de la vela i-1
+            ts_patron = fin_ts_list[i - 1]
+
+            s = stats.get(patron)
+            if s is None:
+                s = StatsPatron()
+                stats[patron] = s
+
+            s.ver_aparicion(ts_patron)
+
+            if siguiente == "V":
+                s.verdes += 1
+            else:
+                s.rojas += 1
+
+    filas: List[Tuple[str, str, float, int, int, int, Optional[datetime], Optional[float]]] = []
+    for patron, s in stats.items():
+        total = s.muestras
+        if total < min_muestras:
+            continue
+
+        if alpha > 0:
+            pv = (s.verdes + alpha) / (total + 2 * alpha)
+            pr = (s.rojas + alpha) / (total + 2 * alpha)
+        else:
+            pv = s.verdes / total
+            pr = s.rojas / total
+
+        if pv >= pr:
+            direccion = "V"
+            efect = pv
+        else:
+            direccion = "R"
+            efect = pr
+
+        filas.append((patron, direccion, efect, total, s.verdes, s.rojas, s.ultima_vez, s.aparece_cada_seg))
+
+    filas.sort(key=lambda x: (x[2], x[3]), reverse=True)
+    return filas

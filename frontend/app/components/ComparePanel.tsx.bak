@@ -1,0 +1,178 @@
+"use client";
+
+import React, { useMemo, useState } from "react";
+import { Intervalo, apiBase, postJSON } from "../lib/api";
+
+type Fila = {
+  dias: number;
+  inicio: string;
+  fin: string;
+  direccion: "V" | "R";
+  efectividad: number | null;
+  muestras: number;
+  verdes: number;
+  rojas: number;
+};
+
+type Res = {
+  patron: string;
+  direccion: "V" | "R";
+  filas: Fila[];
+  tendencia: "ascenso" | "descenso" | "plano";
+};
+
+export default function ComparePanel({
+  abierto,
+  onCerrar,
+  mercadoApi,
+  intervalo,
+  fin,
+  patronInicial,
+  direccionInicial,
+}: {
+  abierto: boolean;
+  onCerrar: () => void;
+  mercadoApi: string;
+  intervalo: Intervalo;
+  fin: string;
+  patronInicial: string | null;
+  direccionInicial: "V" | "R" | null;
+}) {
+  const base = apiBase();
+  const [patron, setPatron] = useState(patronInicial || "");
+  const [direccion, setDireccion] = useState<"V" | "R" | "">(direccionInicial || "");
+  const [ventanas, setVentanas] = useState("3,7,15,30");
+
+  const [cargando, setCargando] = useState(false);
+  const [res, setRes] = useState<Res | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function comparar() {
+    setCargando(true);
+    setError(null);
+    setRes(null);
+
+    const ventanasDias = ventanas
+      .split(",")
+      .map((x) => parseInt(x.trim(), 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    try {
+      const out = await postJSON<Res>(`${base}/patrones/comparar`, {
+        mercado: mercadoApi,
+        intervalo,
+        fin,
+        patron: patron.trim(),
+        direccion: direccion === "" ? null : direccion,
+        ventanas_dias: ventanasDias.length ? ventanasDias : [3, 7, 15, 30],
+      });
+      setRes(out);
+    } catch (e: any) {
+      setError(e?.message || "Error al comparar");
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  const resumen = useMemo(() => {
+    if (!res || !res.filas.length) return null;
+    const filasValidas = res.filas.filter((f) => f.efectividad !== null);
+    if (filasValidas.length < 2) return null;
+    const orden = [...filasValidas].sort((a, b) => a.dias - b.dias);
+    const corta = orden[0];
+    const larga = orden[orden.length - 1];
+    const diff = (corta.efectividad! - larga.efectividad!) * 100;
+    return { diffPct: diff.toFixed(2) };
+  }, [res]);
+
+  if (!abierto) return null;
+
+  return (
+    <div className="card">
+      <div className="cardBody">
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+        <div>
+          <b>Comparar patrón por periodos</b>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Ejemplo: 3,7,15,30 días (editable)</div>
+        </div>
+        <button onClick={onCerrar} >
+          Cerrar
+        </button>
+      </div>
+
+      <div className="grid grid3" style={{ marginTop: 12 }}>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Patrón</div>
+          <input value={patron} onChange={(e) => setPatron(e.target.value)}  />
+        </div>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Dirección (opcional)</div>
+          <select value={direccion} onChange={(e) => setDireccion(e.target.value as any)} >
+            <option value="">Automática</option>
+            <option value="V">V</option>
+            <option value="R">R</option>
+          </select>
+        </div>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.7 }}>Ventanas (días, separadas por coma)</div>
+          <input value={ventanas} onChange={(e) => setVentanas(e.target.value)}  />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+        <button
+          onClick={comparar}
+          disabled={cargando || patron.trim().length < 2}
+          className="btnPrimary"
+        >
+          {cargando ? "Comparando..." : "Comparar ahora"}
+        </button>
+        {error && <div style={{ color: "crimson", fontSize: 13 }}>{error}</div>}
+      </div>
+
+      {res && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 13 }}>
+            Tendencia: <b>{res.tendencia}</b>
+            {resumen && (
+              <span style={{ marginLeft: 10, opacity: 0.8 }}>
+                (corta vs larga: {resumen.diffPct}% arriba/abajo)
+              </span>
+            )}
+          </div>
+
+          <div style={{ overflowX: "auto", marginTop: 10 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ textAlign: "left" }}>
+                  <th style={{ padding: 10, borderBottom: "1px solid #eee" }}>Periodo</th>
+                  <th style={{ padding: 10, borderBottom: "1px solid #eee" }}>Efectividad</th>
+                  <th style={{ padding: 10, borderBottom: "1px solid #eee" }}>Muestras</th>
+                  <th style={{ padding: 10, borderBottom: "1px solid #eee" }}>V</th>
+                  <th style={{ padding: 10, borderBottom: "1px solid #eee" }}>R</th>
+                </tr>
+              </thead>
+              <tbody>
+                {res.filas
+                  .slice()
+                  .sort((a, b) => a.dias - b.dias)
+                  .map((f) => (
+                    <tr key={f.dias}>
+                      <td style={{ padding: 10, borderBottom: "1px solid #f2f2f2" }}>Últimos {f.dias} días</td>
+                      <td style={{ padding: 10, borderBottom: "1px solid #f2f2f2" }}>
+                        {f.efectividad === null ? "-" : (f.efectividad * 100).toFixed(2) + "%"}
+                      </td>
+                      <td style={{ padding: 10, borderBottom: "1px solid #f2f2f2" }}>{f.muestras}</td>
+                      <td style={{ padding: 10, borderBottom: "1px solid #f2f2f2" }}>{f.verdes}</td>
+                      <td style={{ padding: 10, borderBottom: "1px solid #f2f2f2" }}>{f.rojas}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+}

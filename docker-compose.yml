@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: polypatron
+      POSTGRES_PASSWORD: polypatronpass
+      POSTGRES_DB: polypatron_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata_stage:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polypatron -d polypatron_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://polypatron:polypatronpass@db:5432/polypatron_db
+      CORS_ORIGINS: "http://187.77.210.23:3001,http://187.77.210.23:3002"
+    ports:
+      - "8002:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    environment:
+      INTERNAL_API_BASE: "http://api:8000"
+      NEXT_PUBLIC_API_BASE: "http://api:8000"
+      NEXT_PUBLIC_MARKET_LABEL: "BTC Up/Down 1H"
+      NEXT_PUBLIC_MARKET_SLUG: "btc-updown-1h"
+    ports:
+      - "3002:3000"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata_stage:
