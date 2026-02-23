@@ -1,0 +1,10 @@
+services:
+  api:
+    ports:
+      - "8003:8000"
+  web:
+    ports:
+      - "3003:3000"
+  db:
+    ports:
+      - "5435:5432"
