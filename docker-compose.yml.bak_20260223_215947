@@ -21,7 +21,7 @@ services:
       DATABASE_URL: postgresql+psycopg://polypatron:polypatronpass@db:5432/polypatron_db
       CORS_ORIGINS: "http://187.77.210.23:3001,http://187.77.210.23:3002"
     ports:
-      - "8003:8000"
+      - "8002:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -35,7 +35,7 @@ services:
       NEXT_PUBLIC_MARKET_LABEL: "BTC Up/Down 1H"
       NEXT_PUBLIC_MARKET_SLUG: "btc-updown-1h"
     ports:
-      - "3003:3000"
+      - "3002:3000"
     depends_on:
       api:
         condition: service_started
