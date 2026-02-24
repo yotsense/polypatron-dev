@@ -22,6 +22,7 @@ type Props = {
   onChange: (v: Controles) => void;
   onRankear: () => void;
   onComparar: () => void;
+  onVerHistorial: () => void;
   cargando?: boolean;
 };
 
@@ -49,7 +50,7 @@ function toLocalInputFromISO(iso: string) {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
-export default function Controls({ value, onChange, onRankear, onComparar, cargando }: Props) {
+export default function Controls({ value, onChange, onRankear, onComparar, onVerHistorial, cargando }: Props) {
   const set = (patch: Partial<Controles>) => onChange({ ...value, ...patch });
 
   async function usarUltimoMercado() {
@@ -190,6 +191,10 @@ export default function Controls({ value, onChange, onRankear, onComparar, carga
 
           <button type="button" onClick={onComparar}>
             Comparar
+          </button>
+
+          <button type="button" onClick={onVerHistorial}>
+            Ver historial
           </button>
         </div>
       </div>

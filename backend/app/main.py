@@ -15,12 +15,16 @@ from .schemas import (
     ReqRankearPatrones, ResRankearPatrones, FilaPatron,
     ReqSimular, ResSimular, TradeSim,
     ResUltimaVela, ReqCompararVentanas, ResCompararVentanas, FilaComparacion,
+    ResHistorialPatron, OcurrenciaPatron,
+    ReqCompararRango, ResCompararRango,
+    ReqCompararAVsB, ResCompararAVsB,
+    ReqCompararPatronesVs, ResCompararPatronesVs, ResPatronMetricas,
 )
 from .utils_time import iso_a_utc_naive
 from .ingest_gamma import backfill_markets, extraer_campos_vela
 from .patrones import rankear_patrones_con_tiempos
 from .simular import simular_entrar_siempre
-from .comparar import comparar_ventanas
+from .comparar import comparar_ventanas, comparar_rango, comparar_a_vs_b, comparar_patron_vs_patron
 
 Base.metadata.create_all(bind=engine)
 
@@ -202,6 +206,81 @@ async def patrones_rankear(req: ReqRankearPatrones, db: Session = Depends(get_db
         ))
     return ResRankearPatrones(filas=out)
 
+
+@app.get("/patrones/historial", response_model=ResHistorialPatron)
+async def patrones_historial(
+    patron: str,
+    direccion: str,
+    mercado: str,
+    intervalo: str,
+    inicio: datetime,
+    fin: datetime,
+    db: Session = Depends(get_db),
+):
+    if direccion not in ("V", "R"):
+        raise HTTPException(status_code=400, detail="direccion debe ser V o R")
+
+    if not patron or len(patron) < 2 or any(c not in ("V", "R") for c in patron):
+        raise HTTPException(status_code=400, detail="patron inválido: usa solo V/R y longitud >= 2")
+
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=mercado,
+        intervalo=intervalo,
+        inicio=inicio,
+        fin=fin,
+    )
+
+    ini_n = iso_a_utc_naive(inicio)
+    fin_n = iso_a_utc_naive(fin)
+
+    velas = (
+        db.query(Vela)
+        .filter(Vela.mercado == mercado)
+        .filter(Vela.intervalo == intervalo)
+        .filter(Vela.fin_ts_utc >= ini_n)
+        .filter(Vela.fin_ts_utc <= fin_n)
+        .order_by(Vela.fin_ts_utc.asc())
+        .all()
+    )
+
+    velas = [v for v in velas if v.color in ("V", "R")]
+
+    L = len(patron)
+    ocurrencias: List[OcurrenciaPatron] = []
+    ts_ocurrencias: List[datetime] = []
+
+    for i in range(L, len(velas)):
+        patron_actual = "".join(v.color for v in velas[i - L:i])
+        if patron_actual != patron:
+            continue
+
+        vela_res = velas[i]
+        ts = vela_res.fin_ts_utc
+        ts_ocurrencias.append(ts)
+
+        ocurrencias.append(OcurrenciaPatron(
+            fecha=ts.strftime("%Y-%m-%d"),
+            hora=ts.strftime("%H:%M:%S"),
+            direccion_resultado=vela_res.color,
+            mercado_slug=vela_res.slug,
+            mercado_id=vela_res.market_id,
+        ))
+
+    rango_inicio = min(ts_ocurrencias).replace(tzinfo=timezone.utc) if ts_ocurrencias else None
+    rango_fin = max(ts_ocurrencias).replace(tzinfo=timezone.utc) if ts_ocurrencias else None
+
+    return ResHistorialPatron(
+        patron=patron,
+        direccion=direccion,
+        mercado=mercado,
+        intervalo=intervalo,
+        total_muestras=len(ocurrencias),
+        rango_fecha_inicio=rango_inicio,
+        rango_fecha_fin=rango_fin,
+        ocurrencias=ocurrencias,
+    )
+
 @app.post("/simular", response_model=ResSimular)
 async def simular(req: ReqSimular, db: Session = Depends(get_db)):
     # 1) Asegurar datos del rango (sin botón de ingesta)
@@ -323,4 +402,161 @@ async def comparar(req: ReqCompararVentanas, db: Session = Depends(get_db)):
         direccion=req.direccion,
         tendencia=tendencia,
         filas=filas_out,
+    )
+
+
+@app.post("/comparar/rango", response_model=ResCompararRango)
+async def comparar_por_rango(req: ReqCompararRango, db: Session = Depends(get_db)):
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=req.inicio,
+        fin=req.fin,
+    )
+
+    res = comparar_rango(
+        db,
+        req.mercado,
+        req.intervalo,
+        req.inicio,
+        req.fin,
+        req.patron,
+        req.direccion,
+    )
+
+    return ResCompararRango(
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        patron=req.patron,
+        direccion=res["direccion"],
+        inicio=res["inicio"],
+        fin=res["fin"],
+        efectividad=res["efectividad"],
+        muestras=res["muestras"],
+        verdes=res["verdes"],
+        rojas=res["rojas"],
+        aparece_cada_seg=res.get("aparece_cada_seg"),
+        ultima_vez_utc=res.get("ultima_vez_utc"),
+    )
+
+
+@app.post("/comparar/a-vs-b", response_model=ResCompararAVsB)
+async def comparar_a_vs_b_endpoint(req: ReqCompararAVsB, db: Session = Depends(get_db)):
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=min(req.a_inicio, req.b_inicio),
+        fin=max(req.a_fin, req.b_fin),
+    )
+
+    out = comparar_a_vs_b(
+        db,
+        req.mercado,
+        req.intervalo,
+        req.patron,
+        req.direccion,
+        req.a_inicio,
+        req.a_fin,
+        req.b_inicio,
+        req.b_fin,
+    )
+
+    a = out["a"]
+    b = out["b"]
+
+    return ResCompararAVsB(
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        patron=req.patron,
+        direccion=req.direccion,
+        a=ResCompararRango(
+            mercado=req.mercado,
+            intervalo=req.intervalo,
+            patron=req.patron,
+            direccion=a["direccion"],
+            inicio=a["inicio"],
+            fin=a["fin"],
+            efectividad=a["efectividad"],
+            muestras=a["muestras"],
+            verdes=a["verdes"],
+            rojas=a["rojas"],
+            aparece_cada_seg=a.get("aparece_cada_seg"),
+            ultima_vez_utc=a.get("ultima_vez_utc"),
+        ),
+        b=ResCompararRango(
+            mercado=req.mercado,
+            intervalo=req.intervalo,
+            patron=req.patron,
+            direccion=b["direccion"],
+            inicio=b["inicio"],
+            fin=b["fin"],
+            efectividad=b["efectividad"],
+            muestras=b["muestras"],
+            verdes=b["verdes"],
+            rojas=b["rojas"],
+            aparece_cada_seg=b.get("aparece_cada_seg"),
+            ultima_vez_utc=b.get("ultima_vez_utc"),
+        ),
+        delta_efectividad=out.get("delta_efectividad"),
+        delta_muestras=out["delta_muestras"],
+    )
+
+
+@app.post("/comparar/patrones-vs", response_model=ResCompararPatronesVs)
+async def comparar_patrones_vs_endpoint(req: ReqCompararPatronesVs, db: Session = Depends(get_db)):
+    await _asegurar_datos_en_rango(
+        db,
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        inicio=req.inicio,
+        fin=req.fin,
+    )
+
+    out = comparar_patron_vs_patron(
+        db,
+        req.mercado,
+        req.intervalo,
+        req.inicio,
+        req.fin,
+        req.patron_a,
+        req.direccion_a,
+        req.patron_b,
+        req.direccion_b,
+    )
+
+    a = out["a"]
+    b = out["b"]
+
+    return ResCompararPatronesVs(
+        mercado=req.mercado,
+        intervalo=req.intervalo,
+        a=ResPatronMetricas(
+            patron=a["patron"],
+            direccion=a["direccion"],
+            inicio=a["inicio"],
+            fin=a["fin"],
+            efectividad=a["efectividad"],
+            muestras=a["muestras"],
+            verdes=a["verdes"],
+            rojas=a["rojas"],
+            aparece_cada_seg=a.get("aparece_cada_seg"),
+            ultima_vez_utc=a.get("ultima_vez_utc"),
+        ),
+        b=ResPatronMetricas(
+            patron=b["patron"],
+            direccion=b["direccion"],
+            inicio=b["inicio"],
+            fin=b["fin"],
+            efectividad=b["efectividad"],
+            muestras=b["muestras"],
+            verdes=b["verdes"],
+            rojas=b["rojas"],
+            aparece_cada_seg=b.get("aparece_cada_seg"),
+            ultima_vez_utc=b.get("ultima_vez_utc"),
+        ),
+        delta_efectividad=out.get("delta_efectividad"),
+        delta_muestras=out["delta_muestras"],
+        ganador=out["ganador"],
     )

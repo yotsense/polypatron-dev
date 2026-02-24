@@ -97,3 +97,102 @@ class ResCompararVentanas(BaseModel):
     direccion: Literal["V", "R"]
     filas: List[FilaComparacion]
     tendencia: Literal["ascenso", "descenso", "plano"]
+
+
+class ReqCompararRango(BaseModel):
+    mercado: str = "btc-updown"
+    intervalo: Intervalo
+    inicio: datetime
+    fin: datetime
+    patron: str
+    direccion: Optional[Literal["V", "R"]] = None
+
+
+class ResCompararRango(BaseModel):
+    mercado: str
+    intervalo: Intervalo
+    patron: str
+    direccion: Literal["V", "R"]
+    inicio: datetime
+    fin: datetime
+    efectividad: Optional[float]
+    muestras: int
+    verdes: int
+    rojas: int
+    aparece_cada_seg: Optional[int] = None
+    ultima_vez_utc: Optional[datetime] = None
+
+
+class ReqCompararAVsB(BaseModel):
+    mercado: str = "btc-updown"
+    intervalo: Intervalo
+    patron: str
+    direccion: Optional[Literal["V", "R"]] = None
+    a_inicio: datetime
+    a_fin: datetime
+    b_inicio: datetime
+    b_fin: datetime
+
+
+class ResCompararAVsB(BaseModel):
+    mercado: str
+    intervalo: Intervalo
+    patron: str
+    direccion: Optional[Literal["V", "R"]] = None
+    a: ResCompararRango
+    b: ResCompararRango
+    delta_efectividad: Optional[float]
+    delta_muestras: int
+
+
+class ReqCompararPatronesVs(BaseModel):
+    mercado: str = "btc-updown"
+    intervalo: Intervalo
+    inicio: datetime
+    fin: datetime
+    patron_a: str
+    direccion_a: Optional[Literal["V", "R"]] = None
+    patron_b: str
+    direccion_b: Optional[Literal["V", "R"]] = None
+
+
+class ResPatronMetricas(BaseModel):
+    patron: str
+    direccion: Literal["V", "R"]
+    inicio: datetime
+    fin: datetime
+    efectividad: Optional[float]
+    muestras: int
+    verdes: int
+    rojas: int
+    aparece_cada_seg: Optional[int] = None
+    ultima_vez_utc: Optional[datetime] = None
+
+
+class ResCompararPatronesVs(BaseModel):
+    mercado: str
+    intervalo: Intervalo
+    a: ResPatronMetricas
+    b: ResPatronMetricas
+    delta_efectividad: Optional[float]
+    delta_muestras: int
+    ganador: Literal["A", "B", "empate"]
+
+
+class OcurrenciaPatron(BaseModel):
+    fecha: str
+    hora: str
+    direccion_resultado: Literal["V", "R"]
+    mercado_slug: Optional[str] = None
+    mercado_id: Optional[str] = None
+
+
+class ResHistorialPatron(BaseModel):
+    patron: str
+    direccion: Literal["V", "R"]
+    mercado: str
+    intervalo: Intervalo
+    total_muestras: int
+    rango_fecha_inicio: Optional[datetime] = None
+    rango_fecha_fin: Optional[datetime] = None
+    ocurrencias: List[OcurrenciaPatron]

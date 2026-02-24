@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { useTimezone } from "../context/TimezoneContext";
+import { formatDateTime } from "../lib/datetime";
 
 export type FilaPatron = {
   patron: string;
@@ -33,12 +35,15 @@ export default function RankTable({
   ahoraUtc,
   onSimular,
   onElegirParaComparar,
+  onVerHistorial,
 }: {
   filas: FilaPatron[];
   ahoraUtc: string | null;
   onSimular: (patron: string, direccion: "V" | "R") => void;
   onElegirParaComparar: (patron: string, direccion: "V" | "R") => void;
+  onVerHistorial: (patron: string, direccion: "V" | "R") => void;
 }) {
+  const { tz } = useTimezone();
   const [page, setPage] = useState(0);
   const pageSize = 10;
 
@@ -51,10 +56,8 @@ export default function RankTable({
   }, [filas, page]);
 
   const ahoraLocal = useMemo(() => {
-    if (!ahoraUtc) return null;
-    const d = new Date(ahoraUtc);
-    return d.toLocaleString();
-  }, [ahoraUtc]);
+    return formatDateTime(ahoraUtc, tz);
+  }, [ahoraUtc, tz]);
 
   return (
     <div className="card">
@@ -101,7 +104,7 @@ export default function RankTable({
 
           <tbody>
             {(slice || []).map((r, idx) => {
-              const visto = r.ultima_vez_utc ? new Date(r.ultima_vez_utc).toLocaleString() : "-";
+              const visto = formatDateTime(r.ultima_vez_utc, tz);
               return (
                 <tr key={idx}>
                   <td>{r.patron}</td>
@@ -119,6 +122,9 @@ export default function RankTable({
                     </button>
                     <button onClick={() => onElegirParaComparar(r.patron, r.direccion)}>
                       Usar en comparar
+                    </button>
+                    <button onClick={() => onVerHistorial(r.patron, r.direccion)}>
+                      Ver historial
                     </button>
                   </td>
                 </tr>
